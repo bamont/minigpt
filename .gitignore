@@ -2,8 +2,8 @@ __pycache__/
 *.egg-info/
 .venv/
 .pytest_cache/
-data/
-runs/
+/data/
+/runs/
 *.bin
 *.pt
 .ipynb_checkpoints/
