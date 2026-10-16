@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from minigpt.model.attention import KVCache
 from minigpt.model.layers import RMSNorm, TransformerBlock
 
 
@@ -70,3 +71,19 @@ class GPT(nn.Module):
                 logits.reshape(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-100
             )
         return logits, loss
+
+    def forward_cached(
+        self, idx: torch.Tensor, past_key_values: list[KVCache] | None = None
+    ) -> tuple[torch.Tensor, list[KVCache]]:
+        past_length = 0 if past_key_values is None else past_key_values[0][0].size(2)
+        if past_length + idx.size(1) > self.config.block_size:
+            raise ValueError(
+                f"Total length {past_length + idx.size(1)} exceeds block_size {self.config.block_size}"
+            )
+        x = self.tok_emb(idx)
+        presents = []
+        for i, block in enumerate(self.blocks):
+            past = None if past_key_values is None else past_key_values[i]
+            x, present = block.forward_cached(x, past)
+            presents.append(present)
+        return self.lm_head(self.norm(x)), presents

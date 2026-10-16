@@ -1,0 +1,28 @@
+data:
+  train: data/sft_train.npz
+  val: data/sft_val.npz
+  tokenizer: artifacts/tokenizer.json
+
+init:
+  checkpoint: runs/pretrain/best.pt
+
+train:
+  out_dir: runs/sft
+  max_steps: 3000
+  batch_size: 32
+  grad_accum_steps: 2
+  learning_rate: 0.0002
+  min_lr_ratio: 0.1
+  warmup_steps: 100
+  weight_decay: 0.01
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip: 1.0
+  dtype: float16
+  eval_interval: 250
+  eval_iters: 20
+  log_interval: 20
+  checkpoint_interval: 250
+  time_limit_minutes: 690
+  seed: 1337
+  device: auto

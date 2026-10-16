@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from minigpt.model.attention import CausalSelfAttention
+from minigpt.model.attention import CausalSelfAttention, KVCache
 
 
 class RMSNorm(nn.Module):
@@ -43,3 +43,11 @@ class TransformerBlock(nn.Module):
         x = x + self.dropout(self.attn(self.attn_norm(x)))
         x = x + self.dropout(self.mlp(self.mlp_norm(x)))
         return x
+
+    def forward_cached(
+        self, x: torch.Tensor, past_kv: KVCache | None = None
+    ) -> tuple[torch.Tensor, KVCache]:
+        attn_out, present = self.attn.forward_cached(self.attn_norm(x), past_kv)
+        x = x + attn_out
+        x = x + self.mlp(self.mlp_norm(x))
+        return x, present

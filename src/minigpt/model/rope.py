@@ -12,10 +12,10 @@ class RotaryEmbedding(nn.Module):
         self.register_buffer("cos", angles.cos(), persistent=False)
         self.register_buffer("sin", angles.sin(), persistent=False)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, start_pos: int = 0) -> torch.Tensor:
         seq_len = x.size(-2)
-        cos = self.cos[:seq_len]
-        sin = self.sin[:seq_len]
+        cos = self.cos[start_pos : start_pos + seq_len]
+        sin = self.sin[start_pos : start_pos + seq_len]
         x1, x2 = x.float().chunk(2, dim=-1)
         rotated = torch.cat((x1 * cos - x2 * sin, x1 * sin + x2 * cos), dim=-1)
         return rotated.type_as(x)
