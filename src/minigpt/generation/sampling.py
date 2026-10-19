@@ -69,3 +69,49 @@ def generate_stream(
 
 def generate(model: GPT, prompt_ids: list[int], max_new_tokens: int, **kwargs) -> list[int]:
     return list(generate_stream(model, prompt_ids, max_new_tokens, **kwargs))
+
+
+@torch.no_grad()
+def generate_batch(
+    model: GPT,
+    prompt_ids: torch.Tensor,
+    max_new_tokens: int,
+    temperature: float = 0.8,
+    top_k: int | None = None,
+    top_p: float | None = None,
+    eos_id: int | None = None,
+) -> list[list[int]]:
+    prompt_length = prompt_ids.size(1)
+    if prompt_length == 0:
+        raise ValueError("prompt_ids must contain at least one token")
+    budget = min(max_new_tokens, model.config.block_size - prompt_length)
+    if budget <= 0:
+        raise ValueError(
+            f"Prompt of {prompt_length} tokens leaves no room within block_size {model.config.block_size}"
+        )
+
+    was_training = model.training
+    model.eval()
+    try:
+        logits, past = model.forward_cached(prompt_ids)
+        finished = torch.zeros(prompt_ids.size(0), dtype=torch.bool, device=prompt_ids.device)
+        columns = []
+        for step in range(budget):
+            next_id = sample_next_token(logits[:, -1, :].float(), temperature, top_k, top_p)
+            if eos_id is not None:
+                next_id = torch.where(finished.unsqueeze(1), torch.full_like(next_id, eos_id), next_id)
+                finished = finished | (next_id.squeeze(1) == eos_id)
+            columns.append(next_id)
+            if step == budget - 1 or (eos_id is not None and bool(finished.all())):
+                break
+            logits, past = model.forward_cached(next_id, past)
+    finally:
+        model.train(was_training)
+
+    results = []
+    for row in torch.cat(columns, dim=1).tolist():
+        if eos_id is not None and eos_id in row:
+            row = row[: row.index(eos_id) + 1]
+        results.append(row)
+    return results
+

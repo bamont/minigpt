@@ -179,15 +179,18 @@ class Trainer:
             self.scaler.scale(loss).backward()
             total_loss += loss.item()
             tokens += x.numel()
+        return total_loss, self._apply_gradients(total_loss), tokens
+
+    def _apply_gradients(self, total_loss: float) -> float:
         if not math.isfinite(total_loss):
             raise RuntimeError(f"Loss is {total_loss} at step {self.step}")
         self.scaler.unscale_(self.optimizer)
-        max_norm = config.grad_clip if config.grad_clip > 0 else float("inf")
+        max_norm = self.config.grad_clip if self.config.grad_clip > 0 else float("inf")
         grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), max_norm)
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.optimizer.zero_grad(set_to_none=True)
-        return total_loss, float(grad_norm), tokens
+        return float(grad_norm)
 
     def fit(self, resume: bool = False) -> None:
         config = self.config

@@ -1,11 +1,11 @@
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 
 import torch
 
+from minigpt.data.scoring import required_words, score_story
 from minigpt.data.sft_format import build_prompt, parse_example
 from minigpt.generation import generate
 from minigpt.model.checkpoint import load_model
@@ -13,7 +13,6 @@ from minigpt.tokenizer import BPETokenizer
 from minigpt.tokenizer.train_tokenizer import iter_documents
 
 EOS_TOKEN = "<|endoftext|>"
-WORD_PATTERN = re.compile(r"[a-z']+")
 
 
 def load_prompts(path: Path, count: int) -> list[dict[str, str]]:
@@ -25,13 +24,6 @@ def load_prompts(path: Path, count: int) -> list[dict[str, str]]:
             if len(prompts) == count:
                 break
     return prompts
-
-
-def score_story(story: str, words: list[str]) -> tuple[int, int]:
-    vocabulary = set(WORD_PATTERN.findall(story.lower()))
-    exact = sum(word in vocabulary for word in words)
-    prefix = sum(any(token.startswith(word) for token in vocabulary) for word in words)
-    return exact, prefix
 
 
 def main() -> None:
@@ -64,7 +56,7 @@ def main() -> None:
     recall_sum = 0.0
     token_sum = 0
     for count, fields in enumerate(prompts, start=1):
-        words = [word.strip().lower() for word in fields["Words"].split(",") if word.strip()]
+        words = required_words(fields["Words"])
         prompt_ids = tokenizer.encode(build_prompt(fields))
         ids = generate(
             model,

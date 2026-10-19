@@ -2,7 +2,7 @@ import unittest
 
 import torch
 
-from minigpt.generation import generate, sample_next_token
+from minigpt.generation import generate, generate_batch, sample_next_token
 from minigpt.model import GPT, GPTConfig
 from minigpt.model.rope import RotaryEmbedding
 
@@ -106,6 +106,44 @@ class TestGenerate(unittest.TestCase):
         self.model.train()
         generate(self.model, [1, 2], max_new_tokens=3)
         self.assertTrue(self.model.training)
+
+
+class TestGenerateBatch(unittest.TestCase):
+    def setUp(self):
+        torch.manual_seed(0)
+        self.model = GPT(SMALL_CONFIG)
+
+    def test_greedy_batch_matches_single_generation(self):
+        prompts = torch.randint(0, 64, (3, 5))
+        batch = generate_batch(self.model, prompts, max_new_tokens=8, temperature=0)
+        for row, prompt in zip(batch, prompts.tolist()):
+            self.assertEqual(row, generate(self.model, prompt, max_new_tokens=8, temperature=0))
+
+    def test_returns_one_sequence_per_prompt(self):
+        prompts = torch.randint(0, 64, (4, 6))
+        batch = generate_batch(self.model, prompts, max_new_tokens=5, temperature=1.0)
+        self.assertEqual(len(batch), 4)
+        self.assertTrue(all(len(row) == 5 for row in batch))
+
+    def test_truncates_each_row_at_eos(self):
+        prompts = torch.randint(0, 64, (3, 5))
+        reference = generate_batch(self.model, prompts, max_new_tokens=6, temperature=0)
+        eos_id = reference[0][0]
+        batch = generate_batch(self.model, prompts, max_new_tokens=6, temperature=0, eos_id=eos_id)
+        self.assertEqual(batch[0], [eos_id])
+        for row in batch:
+            self.assertTrue(row[-1] == eos_id or len(row) == 6)
+            self.assertEqual(row.count(eos_id), 1 if row[-1] == eos_id else 0)
+
+    def test_restores_training_mode(self):
+        self.model.train()
+        generate_batch(self.model, torch.randint(0, 64, (2, 4)), max_new_tokens=3)
+        self.assertTrue(self.model.training)
+
+    def test_prompt_too_long_raises(self):
+        prompts = torch.randint(0, 64, (2, SMALL_CONFIG.block_size))
+        with self.assertRaises(ValueError):
+            generate_batch(self.model, prompts, max_new_tokens=5)
 
 
 if __name__ == "__main__":

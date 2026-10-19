@@ -1,0 +1,31 @@
+data:
+  train: data/dpo_train.npz
+  val: data/dpo_val.npz
+  tokenizer: artifacts/tokenizer.json
+
+init:
+  checkpoint: runs/sft/best.pt
+
+dpo:
+  beta: 0.1
+
+train:
+  out_dir: runs/dpo
+  max_steps: 500
+  batch_size: 8
+  grad_accum_steps: 4
+  learning_rate: 0.00001
+  min_lr_ratio: 0.1
+  warmup_steps: 20
+  weight_decay: 0.0
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip: 1.0
+  dtype: float16
+  eval_interval: 50
+  eval_iters: 20
+  log_interval: 10
+  checkpoint_interval: 50
+  time_limit_minutes: 690
+  seed: 1337
+  device: auto

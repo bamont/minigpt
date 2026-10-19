@@ -1,0 +1,9 @@
+{
+  "checkpoint": "runs\\sft\\best.pt",
+  "examples": 100,
+  "all_words_exact": 0.3,
+  "all_words_prefix": 0.45,
+  "word_recall": 0.6800000000000002,
+  "finished_with_eos": 0.92,
+  "mean_generated_tokens": 213.6
+}

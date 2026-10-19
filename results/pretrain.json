@@ -1,0 +1,9 @@
+{
+  "checkpoint": "runs\\pretrain\\best.pt",
+  "examples": 100,
+  "all_words_exact": 0.0,
+  "all_words_prefix": 0.0,
+  "word_recall": 0.1766666666666666,
+  "finished_with_eos": 0.98,
+  "mean_generated_tokens": 75.26
+}
