@@ -1,4 +1,5 @@
 import random
+import statistics
 from dataclasses import dataclass
 
 
@@ -7,23 +8,32 @@ class Sample:
     ids: list[int]
     finished: bool
     score: int
+    logprob: float = 0.0
 
 
 def select_pair(
-    samples: list[Sample], rng: random.Random, max_length_ratio: float = 2.0
+    samples: list[Sample],
+    rng: random.Random,
+    max_length_ratio: float = 2.0,
+    logprob_tolerance: float = 0.05,
 ) -> tuple[Sample, Sample] | None:
-    finished = [s for s in samples if s.finished and s.ids]
-    if not finished:
+    usable = [s for s in samples if s.ids]
+    if not usable:
         return None
-    best_score = max(s.score for s in finished)
-    chosen = rng.choice([s for s in finished if s.score == best_score])
+    median_logprob = statistics.median(s.logprob for s in usable)
+
+    eligible = [s for s in usable if s.finished and s.logprob >= median_logprob]
+    if not eligible:
+        return None
+    best_score = max(s.score for s in eligible)
+    chosen = rng.choice([s for s in eligible if s.score == best_score])
 
     candidates = [
         s
-        for s in samples
-        if s.ids
-        and s.score < chosen.score
+        for s in usable
+        if s.score < chosen.score
         and 1 / max_length_ratio <= len(chosen.ids) / len(s.ids) <= max_length_ratio
+        and chosen.logprob >= s.logprob - logprob_tolerance
     ]
     if not candidates:
         return None
