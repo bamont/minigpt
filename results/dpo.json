@@ -1,0 +1,9 @@
+{
+  "checkpoint": "runs\\dpo\\best.pt",
+  "examples": 300,
+  "all_words_exact": 0.9066666666666666,
+  "all_words_prefix": 0.97,
+  "word_recall": 0.9688888888888888,
+  "finished_with_eos": 0.9366666666666666,
+  "mean_generated_tokens": 274.69666666666666
+}

@@ -33,6 +33,7 @@ class TrainConfig:
     eval_iters: int = 50
     log_interval: int = 20
     checkpoint_interval: int = 500
+    snapshot_interval: int = 0
     time_limit_minutes: float | None = None
     seed: int = 1337
     device: str = "auto"

@@ -1,6 +1,8 @@
 import argparse
 import math
 import statistics
+from collections import defaultdict
+from dataclasses import asdict
 from pathlib import Path
 
 import torch
@@ -46,22 +48,35 @@ class DPOTrainer(Trainer):
         beta: float,
         get_train_batch: BatchFn,
         get_val_batch: BatchFn,
+        nll_weight: float = 0.0,
     ):
         super().__init__(model, config, get_train_batch, get_val_batch)
         self.reference = reference.to(self.device).eval()
         for param in self.reference.parameters():
             param.requires_grad_(False)
         self.beta = beta
+        self.nll_weight = nll_weight
 
     def _compute_loss(
         self, inputs: torch.Tensor, targets: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         with torch.no_grad(), self._autocast():
             reference = sequence_logprobs(self.reference, inputs, targets)
         with self._autocast():
             policy = sequence_logprobs(self.model, inputs, targets)
         half = inputs.size(0) // 2
-        return dpo_loss(policy[:half], policy[half:], reference[:half], reference[half:], self.beta)
+        dpo, accuracy, margin = dpo_loss(
+            policy[:half], policy[half:], reference[:half], reference[half:], self.beta
+        )
+        chosen_tokens = (targets[:half] != IGNORE_INDEX).sum(dim=-1).clamp(min=1)
+        nll = (-policy[:half] / chosen_tokens).mean()
+        stats = {
+            "dpo_loss": dpo.detach(),
+            "nll": nll.detach(),
+            "accuracy": accuracy.detach(),
+            "margin": margin.detach(),
+        }
+        return dpo + self.nll_weight * nll, stats
 
     def _train_step(self) -> tuple[float, float, int]:
         config = self.config
@@ -69,7 +84,7 @@ class DPOTrainer(Trainer):
         tokens = 0
         for _ in range(config.grad_accum_steps):
             inputs, targets = self.get_train_batch(config.batch_size, self.device)
-            loss, _, _ = self._compute_loss(inputs, targets)
+            loss, _ = self._compute_loss(inputs, targets)
             loss = loss / config.grad_accum_steps
             self.scaler.scale(loss).backward()
             total_loss += loss.item()
@@ -77,39 +92,55 @@ class DPOTrainer(Trainer):
         return total_loss, self._apply_gradients(total_loss), tokens
 
     @torch.no_grad()
-    def _evaluate_split(self, get_batch: BatchFn) -> tuple[float, float, float]:
-        losses, accuracies, margins = [], [], []
+    def _evaluate_split(self, get_batch: BatchFn) -> dict[str, float]:
+        values: dict[str, list[float]] = defaultdict(list)
         for _ in range(self.config.eval_iters):
             inputs, targets = get_batch(self.config.batch_size, self.device)
-            loss, accuracy, margin = self._compute_loss(inputs, targets)
-            losses.append(loss.item())
-            accuracies.append(accuracy.item())
-            margins.append(margin.item())
-        return statistics.fmean(losses), statistics.fmean(accuracies), statistics.fmean(margins)
+            loss, stats = self._compute_loss(inputs, targets)
+            values["loss"].append(loss.item())
+            for name, value in stats.items():
+                values[name].append(value.item())
+        return {name: statistics.fmean(items) for name, items in values.items()}
 
     def _evaluate_and_log(self) -> None:
         self.model.eval()
-        train_loss, train_accuracy, _ = self._evaluate_split(self.get_train_batch)
-        val_loss, val_accuracy, val_margin = self._evaluate_split(self.get_val_batch)
+        train = self._evaluate_split(self.get_train_batch)
+        val = self._evaluate_split(self.get_val_batch)
         self.model.train()
         print(
-            f"step {self.step}: train loss {train_loss:.4f}, val loss {val_loss:.4f}, "
-            f"val accuracy {val_accuracy:.3f}, val margin {val_margin:.3f}"
+            f"step {self.step}: train loss {train['loss']:.4f}, val loss {val['loss']:.4f}, "
+            f"val dpo {val['dpo_loss']:.4f}, val nll {val['nll']:.3f}, "
+            f"val accuracy {val['accuracy']:.3f}, val margin {val['margin']:.3f}"
         )
         self._log(
             {
                 "type": "eval",
                 "step": self.step,
-                "train_loss": train_loss,
-                "train_accuracy": train_accuracy,
-                "val_loss": val_loss,
-                "val_accuracy": val_accuracy,
-                "val_margin": val_margin,
+                "train_loss": train["loss"],
+                "train_accuracy": train["accuracy"],
+                "val_loss": val["loss"],
+                "val_dpo_loss": val["dpo_loss"],
+                "val_nll": val["nll"],
+                "val_accuracy": val["accuracy"],
+                "val_margin": val["margin"],
             }
         )
-        if val_loss < self.best_val_loss:
-            self.best_val_loss = val_loss
+        if val["loss"] < self.best_val_loss:
+            self.best_val_loss = val["loss"]
             self._save_best()
+
+    def _save_last(self) -> None:
+        super()._save_last()
+        interval = self.config.snapshot_interval
+        if interval and self.step % interval == 0:
+            self._save(
+                self.out_dir / f"step_{self.step}.pt",
+                {
+                    "model": self.model.state_dict(),
+                    "step": self.step,
+                    "model_config": asdict(self.model.config),
+                },
+            )
 
 
 def main() -> None:
@@ -140,6 +171,7 @@ def main() -> None:
         config["dpo"]["beta"],
         train_data.get_batch,
         val_data.get_batch,
+        nll_weight=config["dpo"].get("nll_weight", 0.0),
     )
     trainer.fit(resume=args.resume)
 

@@ -19,8 +19,8 @@ class TestScoring(unittest.TestCase):
         self.assertEqual(exact, 1)
 
 
-def sample(score: int, length: int = 100, finished: bool = True) -> Sample:
-    return Sample(ids=list(range(length)), finished=finished, score=score)
+def sample(score: int, length: int = 100, finished: bool = True, logprob: float = -1.0) -> Sample:
+    return Sample(ids=list(range(length)), finished=finished, score=score, logprob=logprob)
 
 
 class TestSelectPair(unittest.TestCase):
@@ -64,6 +64,32 @@ class TestSelectPair(unittest.TestCase):
         second = select_pair(samples, random.Random(5))
         self.assertIs(first[0], second[0])
         self.assertIs(first[1], second[1])
+
+    def test_unnatural_best_sample_is_not_chosen(self):
+        samples = [
+            sample(3, logprob=-2.0),
+            sample(2, logprob=-0.9),
+            sample(0, logprob=-1.0),
+            sample(1, logprob=-1.1),
+        ]
+        chosen, rejected = select_pair(samples, self.rng)
+        self.assertEqual((chosen.score, rejected.score), (2, 0))
+
+    def test_rejected_much_more_natural_than_chosen_is_skipped(self):
+        samples = [
+            sample(2, logprob=-0.6),
+            sample(1, logprob=-1.0),
+            sample(0, logprob=-0.4),
+            sample(0, logprob=-1.2),
+        ]
+        chosen, rejected = select_pair(samples, self.rng, logprob_tolerance=0.05)
+        self.assertEqual(chosen.score, 2)
+        self.assertEqual((rejected.score, rejected.logprob), (0, -1.2))
+
+    def test_tolerance_allows_slightly_more_natural_rejected(self):
+        samples = [sample(2, logprob=-0.6), sample(0, logprob=-0.58), sample(1, logprob=-1.5)]
+        chosen, rejected = select_pair(samples, self.rng, logprob_tolerance=0.05)
+        self.assertEqual((chosen.score, rejected.score), (2, 0))
 
 
 if __name__ == "__main__":

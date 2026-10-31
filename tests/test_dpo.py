@@ -104,7 +104,7 @@ class TestPreferenceDataset(unittest.TestCase):
 
 
 class TestDPOTrainer(unittest.TestCase):
-    def test_training_reduces_the_loss(self):
+    def run_training(self, tmp: str, nll_weight: float = 0.0, snapshot_interval: int = 0):
         rng = np.random.default_rng(0)
         pairs = [
             (
@@ -114,35 +114,56 @@ class TestDPOTrainer(unittest.TestCase):
             )
             for _ in range(16)
         ]
+        path = Path(tmp) / "pairs.npz"
+        write_pairs(path, pairs)
+        dataset = PreferenceDataset(path, PAD_ID)
+        torch.manual_seed(0)
+        policy = GPT(SMALL_CONFIG)
+        reference = GPT(SMALL_CONFIG)
+        reference.load_state_dict(policy.state_dict())
+        config = TrainConfig(
+            out_dir=str(Path(tmp) / "run"),
+            max_steps=40,
+            batch_size=4,
+            grad_accum_steps=1,
+            learning_rate=1e-3,
+            warmup_steps=2,
+            eval_interval=20,
+            eval_iters=5,
+            log_interval=10,
+            checkpoint_interval=20,
+            snapshot_interval=snapshot_interval,
+            device="cpu",
+            dtype="float32",
+        )
+        trainer = DPOTrainer(
+            policy, reference, config, 0.1, dataset.get_batch, dataset.get_batch, nll_weight=nll_weight
+        )
+        trainer.fit()
+        run_dir = Path(tmp) / "run"
+        lines = (run_dir / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+        evals = [r for r in map(json.loads, lines) if r["type"] == "eval"]
+        return run_dir, evals
+
+    def test_training_reduces_the_loss(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
-            path = Path(tmp) / "pairs.npz"
-            write_pairs(path, pairs)
-            dataset = PreferenceDataset(path, PAD_ID)
-            torch.manual_seed(0)
-            policy = GPT(SMALL_CONFIG)
-            reference = GPT(SMALL_CONFIG)
-            reference.load_state_dict(policy.state_dict())
-            config = TrainConfig(
-                out_dir=str(Path(tmp) / "run"),
-                max_steps=40,
-                batch_size=4,
-                grad_accum_steps=1,
-                learning_rate=1e-3,
-                warmup_steps=2,
-                eval_interval=20,
-                eval_iters=5,
-                log_interval=10,
-                checkpoint_interval=20,
-                device="cpu",
-                dtype="float32",
-            )
-            DPOTrainer(policy, reference, config, 0.1, dataset.get_batch, dataset.get_batch).fit()
-            run_dir = Path(tmp) / "run"
-            lines = (run_dir / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
-            evals = [r for r in map(json.loads, lines) if r["type"] == "eval"]
+            run_dir, evals = self.run_training(tmp)
             self.assertTrue((run_dir / "best.pt").exists())
         self.assertAlmostEqual(evals[0]["val_loss"], math.log(2), places=4)
         self.assertLess(evals[-1]["val_loss"], evals[0]["val_loss"])
+
+    def test_likelihood_term_is_added_to_the_loss(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            _, evals = self.run_training(tmp, nll_weight=1.0)
+        first = evals[0]
+        self.assertAlmostEqual(first["val_dpo_loss"], math.log(2), places=4)
+        self.assertAlmostEqual(first["val_loss"], first["val_dpo_loss"] + first["val_nll"], places=4)
+
+    def test_snapshots_are_written(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            run_dir, _ = self.run_training(tmp, snapshot_interval=20)
+            self.assertTrue((run_dir / "step_20.pt").exists())
+            self.assertTrue((run_dir / "step_40.pt").exists())
 
 
 if __name__ == "__main__":

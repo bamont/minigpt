@@ -9,12 +9,15 @@ import torch
 
 from minigpt.data.preference_pairs import Sample, select_pair
 from minigpt.data.scoring import required_words, score_story
+from minigpt.data.sft_dataset import IGNORE_INDEX, build_batch
 from minigpt.data.sft_format import build_prompt
 from minigpt.generation import generate_batch
 from minigpt.model.checkpoint import load_model
 from minigpt.tokenizer import BPETokenizer
+from minigpt.training.dpo import sequence_logprobs
 
 EOS_TOKEN = "<|endoftext|>"
+SCORING_CHUNK = 32
 
 
 def save_pairs(path: Path, pairs: list[tuple[list[int], list[int], list[int]]]) -> None:
@@ -31,6 +34,28 @@ def save_pairs(path: Path, pairs: list[tuple[list[int], list[int], list[int]]]) 
     )
 
 
+@torch.no_grad()
+def mean_token_logprobs(
+    model: torch.nn.Module,
+    prompts: list[list[int]],
+    responses: list[list[int]],
+    pad_id: int,
+    device: torch.device,
+) -> list[float]:
+    sequences = [np.array(prompt + response, dtype=np.int64) for prompt, response in zip(prompts, responses)]
+    prompt_lengths = [len(prompt) for prompt in prompts]
+    results: list[float] = []
+    for start in range(0, len(sequences), SCORING_CHUNK):
+        stop = start + SCORING_CHUNK
+        inputs, targets = build_batch(sequences[start:stop], prompt_lengths[start:stop], pad_id)
+        inputs, targets = inputs.to(device), targets.to(device)
+        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
+            logprobs = sequence_logprobs(model, inputs, targets)
+        counts = (targets != IGNORE_INDEX).sum(dim=-1).clamp(min=1)
+        results.extend((logprobs / counts).tolist())
+    return results
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sample stories and build preference pairs from word coverage.")
     parser.add_argument("--prompts", type=Path, required=True)
@@ -43,6 +68,7 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--max-length-ratio", type=float, default=2.0)
+    parser.add_argument("--logprob-tolerance", type=float, default=0.05)
     parser.add_argument("--val-fraction", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="auto")
@@ -68,16 +94,17 @@ def main() -> None:
 
     prompts_per_batch = max(1, args.batch_size // args.samples_per_prompt)
     pairs: list[tuple[list[int], list[int], list[int]]] = []
-    chosen_scores, rejected_scores, chosen_lengths, rejected_lengths = [], [], [], []
+    chosen_scores, rejected_scores = [], []
+    chosen_lengths, rejected_lengths = [], []
+    chosen_logprobs, rejected_logprobs = [], []
     all_words_samples = total_samples = no_pair = processed = batches = 0
 
     for length in sorted(buckets):
         indices = buckets[length]
         for start in range(0, len(indices), prompts_per_batch):
             chunk = indices[start : start + prompts_per_batch]
-            batch = torch.tensor(
-                [encoded[i] for i in chunk for _ in range(args.samples_per_prompt)], device=device
-            )
+            batch_prompts = [encoded[i] for i in chunk for _ in range(args.samples_per_prompt)]
+            batch = torch.tensor(batch_prompts, device=device)
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
                 outputs = generate_batch(
                     model,
@@ -87,18 +114,23 @@ def main() -> None:
                     top_k=args.top_k,
                     eos_id=eos_id,
                 )
+            logprobs = mean_token_logprobs(model, batch_prompts, outputs, eos_id, device)
 
             for position, index in enumerate(chunk):
                 words = required_words(prompts[index]["Words"])
+                first = position * args.samples_per_prompt
                 samples = []
-                for ids in outputs[position * args.samples_per_prompt : (position + 1) * args.samples_per_prompt]:
+                for ids, logprob in zip(
+                    outputs[first : first + args.samples_per_prompt],
+                    logprobs[first : first + args.samples_per_prompt],
+                ):
                     finished = ids[-1] == eos_id
                     story = tokenizer.decode(ids[:-1] if finished else ids)
-                    samples.append(Sample(ids, finished, score_story(story, words)[0]))
+                    samples.append(Sample(ids, finished, score_story(story, words)[0], logprob))
                 all_words_samples += sum(s.score == len(words) for s in samples)
                 total_samples += len(samples)
 
-                pair = select_pair(samples, rng, args.max_length_ratio)
+                pair = select_pair(samples, rng, args.max_length_ratio, args.logprob_tolerance)
                 if pair is None:
                     no_pair += 1
                     continue
@@ -108,6 +140,8 @@ def main() -> None:
                 rejected_scores.append(rejected.score)
                 chosen_lengths.append(len(chosen.ids))
                 rejected_lengths.append(len(rejected.ids))
+                chosen_logprobs.append(chosen.logprob)
+                rejected_logprobs.append(rejected.logprob)
 
             processed += len(chunk)
             batches += 1
@@ -128,6 +162,7 @@ def main() -> None:
     print(f"Samples containing all words: {all_words_samples / total_samples:.1%}")
     print(f"Mean words covered, chosen vs rejected: {mean(chosen_scores):.2f} vs {mean(rejected_scores):.2f}")
     print(f"Mean tokens, chosen vs rejected: {mean(chosen_lengths):.0f} vs {mean(rejected_lengths):.0f}")
+    print(f"Mean token log-probability, chosen vs rejected: {mean(chosen_logprobs):.3f} vs {mean(rejected_logprobs):.3f}")
 
 
 if __name__ == "__main__":
